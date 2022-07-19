@@ -2,6 +2,7 @@ package com.yb.part5_chapter03
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.Toast
@@ -21,7 +23,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.isVisible
+import com.yb.part5_chapter03.ImageListActivity.Companion.IMAGE_LIST_REQUEST_CODE
 import com.yb.part5_chapter03.databinding.ActivityMainBinding
+import com.yb.part5_chapter03.extensions.clear
 import com.yb.part5_chapter03.extensions.loadCenterCrop
 import com.yb.part5_chapter03.util.PathUtil
 import java.io.File
@@ -54,6 +59,8 @@ class MainActivity : AppCompatActivity() {
 
     private var isCapturing: Boolean = false
 
+    private var isFlashEnabled: Boolean = false
+
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
 
@@ -63,7 +70,8 @@ class MainActivity : AppCompatActivity() {
             // 화면이 회전되었을때 대응
             if (this@MainActivity.displayId == displayId) {
                 if (::imageCapture.isInitialized && root != null) {
-                    imageCapture.targetRotation = root?.display?.rotation ?: ImageOutputConfig.INVALID_ROTATION
+                    imageCapture.targetRotation =
+                        root?.display?.rotation ?: ImageOutputConfig.INVALID_ROTATION
                 }
 
             }
@@ -137,12 +145,23 @@ class MainActivity : AppCompatActivity() {
                     preview.setSurfaceProvider(viewFinder.surfaceProvider)
                     bindCaptureListener()
                     bindZoomListener()
+                    initFlashAndAddListener()
+                    bindPreviewImageViewClickListener()
 
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }, cameraMainExecutor
         )
+    }
+
+    private fun bindCaptureListener() = with(binding) {
+        captureButton.setOnClickListener {
+            if (!isCapturing) {
+                isCapturing = true
+                captureCamera()
+            }
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -164,34 +183,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSavedImageContent() {
-        contentUri?.let {
-            isCapturing = try {
-                val file = File(PathUtil.getPath(this, it) ?: throw FileNotFoundException())
-                MediaScannerConnection.scanFile(this,
-                    arrayOf(file.path),
-                    arrayOf("image/jpeg"),
-                    null)
+    private fun initFlashAndAddListener() = with(binding) {
+        val hasFlash = camera?.cameraInfo?.hasFlashUnit() ?: false
+        flashSwitch.isVisible = hasFlash
 
-                Handler(Looper.getMainLooper()).post {
-                    binding.previewImageView.loadCenterCrop(it.toString(), 4f)
-                }
-                uriList.add(it)
-                false
-            } catch (e: Exception) {
-                e.printStackTrace()
-                Toast.makeText(this, "파일이 존재하지 않습니다", Toast.LENGTH_SHORT).show()
-                false
+        if (hasFlash) {
+            flashSwitch.setOnCheckedChangeListener { _, isChecked ->
+                isFlashEnabled = isChecked
             }
-        }
-    }
-
-    private fun bindCaptureListener() = with(binding) {
-        captureButton.setOnClickListener {
-            if (!isCapturing) {
-                isCapturing = true
-                captureCamera()
-            }
+        } else {
+            isFlashEnabled = false
+            flashSwitch.setOnCheckedChangeListener(null)
         }
     }
 
@@ -208,6 +210,10 @@ class MainActivity : AppCompatActivity() {
 
         val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
+        if (isFlashEnabled) {
+            flashLight(true)
+        }
+
         imageCapture.takePicture(
             outputOptions,
             cameraExecutor,
@@ -221,15 +227,58 @@ class MainActivity : AppCompatActivity() {
                 override fun onError(exception: ImageCaptureException) {
                     exception.printStackTrace()
                     isCapturing = false
+                    flashLight(false)
                 }
 
             }
         )
     }
 
+    private fun flashLight(light: Boolean) {
+        val hasFlash = camera?.cameraInfo?.hasFlashUnit() ?: false
+        if (hasFlash) {
+            camera?.cameraControl?.enableTorch(light)
+        }
+    }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
+    private fun updateSavedImageContent() {
+        contentUri?.let {
+            isCapturing = try {
+                val file = File(PathUtil.getPath(this, it) ?: throw FileNotFoundException())
+                MediaScannerConnection.scanFile(this,
+                    arrayOf(file.path),
+                    arrayOf("image/jpeg"),
+                    null)
+
+                Handler(Looper.getMainLooper()).post {
+                    binding.previewImageView.loadCenterCrop(it.toString(), 4f)
+                }
+                uriList.add(it)
+                flashLight(false)
+                false
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(this, "파일이 존재하지 않습니다", Toast.LENGTH_SHORT).show()
+                flashLight(false)
+                false
+            }
+        }
+    }
+
+    private fun bindPreviewImageViewClickListener() = with(binding) {
+        previewImageView.setOnClickListener {
+            startActivityForResult(
+                ImageListActivity.newIntent(this@MainActivity, uriList), IMAGE_LIST_REQUEST_CODE
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
             if (allPermissionGranted()) {
                 startCamera(binding.viewFinder)
@@ -238,7 +287,18 @@ class MainActivity : AppCompatActivity() {
                 finish()
             }
         }
+    }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == IMAGE_LIST_REQUEST_CODE && resultCode == Activity.RESULT_OK) {
+            uriList = data?.getParcelableArrayListExtra(ImageListActivity.URI_LIST_KEY) ?: uriList
+            if (uriList.isNotEmpty()) {
+                binding.previewImageView.loadCenterCrop(url = uriList.first().toString(), corner = 4f)
+            } else {
+                binding.previewImageView.clear()
+            }
+        }
     }
 
 
